@@ -50,104 +50,81 @@ namespace NKafka
 
             this.client = new Client(config.BootstrapServers);
 
-            this.buffer = new byte[config.BufferMemoryBytes];
-            this.bufferMessageCount = 0;
-            this.bufferCurrentPos = 0;
-            this.correlationId = 1;
-
             this.callbackCts = new CancellationTokenSource();
             this.callbackTask = StartPollTask(callbackCts.Token);
+
+            this.bufferPool = new BufferPool(config.BufferMemoryBytes);
         }
 
         public delegate void ack(ProduceResponse r);
 
         private object producerLock = new object();
 
-        internal class BufferPool
-        {
-            public BufferPool()
-            {
-
-            }
-
-
-        }
+        private BufferPool bufferPool;
         
-        private byte[] buffer;
-
-        private int bufferMessageCount;
-        private int bufferCurrentPos;
-        private DateTime lastSent;
-        private int correlationId;
-
-        // A bunch of offsets into buffer that are requred to finalize the message.
-        private int requestSizeOffset;
-        private int messageSetSizeOffset;
-        private int lengthOffset;
-        private int crcOffset;
-        private int recordCountOffset;
-        private int attributesOffset;
-
         public unsafe void Produce(string topic, byte[] key, byte[] value)
         {
             lock (producerLock)
             {
-                fixed (byte *b = this.buffer)
+                var buffer = bufferPool.Get(new TopicPartition(topic, 0));
+                fixed (byte *b = buffer.buffer)
                 {
-                    if (bufferCurrentPos == 0)
+                    if (buffer.bufferCurrentPos == 0)
                     {
                         byte* requestSizePtr;
                         byte* messageSetSizePtr;
                         byte *currentPosPtr = this.WriteProduceRequestHeader(b, topic, out requestSizePtr, out messageSetSizePtr);
-                        requestSizeOffset = (int)(requestSizePtr-b);
-                        messageSetSizeOffset = (int)(messageSetSizePtr-b);
+                        buffer.requestSizeOffset = (int)(requestSizePtr-b);
+                        buffer.messageSetSizeOffset = (int)(messageSetSizePtr-b);
 
                         byte* lengthPtr;
                         byte* crcPtr;
                         byte* recordCountPtr;
                         byte* attributesPtr;
                         currentPosPtr = this.WriteRecordBatchHeader(currentPosPtr, out lengthPtr, out crcPtr, out attributesPtr, out recordCountPtr);
-                        lengthOffset = (int)(lengthPtr-b);
-                        crcOffset = (int)(crcPtr-b);
-                        attributesOffset = (int)(attributesPtr-b);
-                        recordCountOffset = (int)(recordCountPtr-b);
+                        buffer.lengthOffset = (int)(lengthPtr-b);
+                        buffer.crcOffset = (int)(crcPtr-b);
+                        buffer.attributesOffset = (int)(attributesPtr-b);
+                        buffer.recordCountOffset = (int)(recordCountPtr-b);
 
-                        bufferCurrentPos = (int)(currentPosPtr-b);
+                        buffer.bufferCurrentPos = (int)(currentPosPtr-b);
                     }
 
-                    bufferMessageCount += 1;
-                    byte* end = WriteRecord(b + bufferCurrentPos, key, value);
-                    bufferCurrentPos = (int)(end-b);
+                    buffer.bufferMessageCount += 1;
+                    byte* end = WriteRecord(b + buffer.bufferCurrentPos, key, value);
+                    buffer.bufferCurrentPos = (int)(end-b);
                 }
             }
         }
 
-        public void Send(ack ack)
+        public void Send(string topic, ack ack)
         {
+            Buffer buffer = this.bufferPool.Get(new TopicPartition(topic, 0));
+
             lock (producerLock)
             {
-                fixed (byte *b = this.buffer)
+                fixed (byte *b = buffer.buffer)
                 {
-                    byte* bufferEnd = b + bufferCurrentPos;
+                    byte* bufferEnd = b + buffer.bufferCurrentPos;
 
-                    byte* requestSizePtr = b + requestSizeOffset;
-                    byte* messageSetSizePtr = b + messageSetSizeOffset;
-                    byte* lengthPtr = b + lengthOffset;
-                    byte* crcPtr = b + crcOffset;
-                    byte* recordCountPtr = b + recordCountOffset;
-                    byte* attributesPtr = b + attributesOffset;
+                    byte* requestSizePtr = b + buffer.requestSizeOffset;
+                    byte* messageSetSizePtr = b + buffer.messageSetSizeOffset;
+                    byte* lengthPtr = b + buffer.lengthOffset;
+                    byte* crcPtr = b + buffer.crcOffset;
+                    byte* recordCountPtr = b + buffer.recordCountOffset;
+                    byte* attributesPtr = b + buffer.attributesOffset;
 
                     *((Int32 *)messageSetSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - messageSetSizePtr) - 4);  
                     *((Int32 *)requestSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - b) - 4);
                     *((Int32 *)lengthPtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - lengthPtr - 4));
-                    *((Int32 *)recordCountPtr) = IPAddress.HostToNetworkOrder((int)this.bufferMessageCount);
+                    *((Int32 *)recordCountPtr) = IPAddress.HostToNetworkOrder((int)buffer.bufferMessageCount);
                     var crc = Crc32Provider.ComputeHash(attributesPtr, 0, (int)(bufferEnd-attributesPtr));
                     for (int i=0; i<crc.Length; ++i) *crcPtr++ = crc[i];
 
-                    bufferCurrentPos = (int)(bufferEnd - b);
+                    buffer.bufferCurrentPos = (int)(bufferEnd - b);
                 }
 
-                client.Send(this.buffer, this.bufferCurrentPos);
+                client.Send(buffer.buffer, buffer.bufferCurrentPos);
 
                 fixed (byte *b = client.Receive())
                 {

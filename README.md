@@ -1,11 +1,11 @@
 
 ## NKafka
 
-This is an experimental client for Apache Kafka. Have some radical ideas, they may not work.
+This is an experimental client for Apache Kafka. I have some radical ideas, they may not work.
 
-I'm pulling a lot of stuff from Confluent.Kafka - this is primarily a rewrite of the backend in managed code.
+It pulls a lot of stuff in from Confluent.Kafka - this is primarily a rewrite of the backend in managed code.
 
-Currently at second milestone: able to produce a batch of V2 messages successfully.
+Status: passed second milestone: able to produce a batch of V2 messages successfully. No Consumer.
 
 ### Motivation
 

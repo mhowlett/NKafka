@@ -21,7 +21,7 @@ namespace NKafka
     /// <summary>
     ///     Represents a Kafka (topic, partition) tuple.
     /// </summary>
-    public class TopicPartition
+    public struct TopicPartition
     {
         /// <summary>
         ///     Initializes a new TopicPartition instance.

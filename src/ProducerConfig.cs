@@ -47,6 +47,9 @@ namespace NKafka
 
         public Int32 RequestTimeoutMs { get; set; } = 30000;
 
+        /// <summary>
+        ///     TODO: allow override on a per topic level.
+        /// </summary>
         public Int32 BufferMemoryBytes { get; set; } = 33554432;
 
         public CompressionType CompressionType { get; set; } = CompressionType.None;
