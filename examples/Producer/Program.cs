@@ -47,6 +47,13 @@ namespace NKafka
                     p.Produce("lala", null, Encoding.UTF8.GetBytes("AAAABBBBCCCC"));
                 }
 
+                // p.Flush(TimeSpan.FromSeconds(10));
+
+                for (int i=0; i<20; ++i)
+                {
+                    p.Produce("lala", null, Encoding.UTF8.GetBytes("123 123"));
+                }
+
                 p.Flush(TimeSpan.FromSeconds(10));
             }
         }

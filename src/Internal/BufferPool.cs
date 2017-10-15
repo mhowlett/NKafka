@@ -15,18 +15,18 @@ namespace NKafka
             this.bufferSize = bufferSize;
         }
 
-        public Buffer GetBuffer(TopicPartition tp, object availableLockObj)
+        public Buffer GetFreeForUseBuffer(TopicPartition tp, object availableLockObj)
         {
-            if (filling.TryGetValue(tp, out Buffer buf))
+            if (fillingUp.TryGetValue(tp, out Buffer buf))
             {
                 return buf;
             }
 
             lock (availableLockObj)
             {
-                if (available.Count == 0)
+                if (freeForUse.Count == 0)
                 {
-                    this.available.Add(new Buffer(this.bufferSize));
+                    this.freeForUse.Add(new Buffer(this.bufferSize));
                     this.bufferCount += 1;
                     if (this.bufferCount > 10)
                     {
@@ -34,18 +34,18 @@ namespace NKafka
                     }
                 }
 
-                Buffer forUse = available[available.Count-1];
-                available.RemoveAt(available.Count-1);
+                Buffer forUse = freeForUse[freeForUse.Count-1];
+                freeForUse.RemoveAt(freeForUse.Count-1);
                 forUse.Repurpose(tp, ++this.lastCorrelationId);
-                filling.Add(tp, forUse);
+                fillingUp.Add(tp, forUse);
                 return forUse;
             }
         }
 
-        public void MoveToForFinalize(TopicPartition tp)
+        public void FillingUpToForFinalize(TopicPartition tp)
         {
-            var b = filling[tp];
-            filling.Remove(tp);
+            var b = fillingUp[tp];
+            fillingUp.Remove(tp);
             forFinalize.Add(b);
         }
 
@@ -55,10 +55,10 @@ namespace NKafka
             forSend.Add(buffer);
         }
 
-        public void TransitionToForFinalize(int lingerMs, int batchSize)
+        public void ToForFinalizeIfRequired(int lingerMs, int batchSize)
         {
             List<KeyValuePair<TopicPartition, Buffer>> toTransition = null;
-            foreach (var kvp in filling)
+            foreach (var kvp in fillingUp)
             {
                 if (kvp.Value.bufferMessageCount >= batchSize)
                 {
@@ -72,15 +72,15 @@ namespace NKafka
             }
         }
 
-        public void MakeAvailable(Buffer b)
+        public void InFlightToFreeForUse(Buffer b)
         {
             inFlight.Remove(b);
-            available.Add(b);
+            freeForUse.Add(b);
         }
 
-        public Dictionary<TopicPartition, Buffer> Filling
+        public Dictionary<TopicPartition, Buffer> FillingUp
         {
-            get { return this.filling; }
+            get { return this.fillingUp; }
         }
 
         public List<Buffer> ForFinalize
@@ -99,10 +99,10 @@ namespace NKafka
         }
 
         int lastCorrelationId = 0;
-        Dictionary<TopicPartition, Buffer> filling = new Dictionary<TopicPartition, Buffer>();
+        Dictionary<TopicPartition, Buffer> fillingUp = new Dictionary<TopicPartition, Buffer>();
         List<Buffer> forFinalize = new List<Buffer>();
         List<Buffer> forSend = new List<Buffer>();
-        List<Buffer> available = new List<Buffer>();
+        List<Buffer> freeForUse = new List<Buffer>();
         List<Buffer> inFlight = new List<Buffer>();
     }
 }

@@ -29,8 +29,8 @@ namespace NKafka
 
         private ProducerConfig config;
         private Client client;
-        private Task bufferPoolTask;
-        private CancellationTokenSource bufferPoolCts;
+        private Task bufferFinalizeTask;
+        private CancellationTokenSource bufferFinalizeCts;
         private Task networkTask;
         private CancellationTokenSource networkCts;
         private callback ack;
@@ -48,11 +48,11 @@ namespace NKafka
 
             this.bufferPool = new BufferPool(config.BufferMemoryBytes);
 
-            this.bufferPoolCts = new CancellationTokenSource();
-            this.bufferPoolTask = StartBufferPoolTask(bufferPoolCts.Token);
-
             this.networkCts = new CancellationTokenSource();
             this.networkTask = StartNetworkTask(networkCts.Token);
+
+            this.bufferFinalizeCts = new CancellationTokenSource();
+            this.bufferFinalizeTask = StartBufferFinalizeTask(bufferFinalizeCts.Token);
         }
 
         private void StartFinalizeAndSends()
@@ -63,7 +63,10 @@ namespace NKafka
                 foreach (var b in cpy)
                 {
                     Finalize(b);
-                    lock (forSendLock)
+                }
+                lock (forSendLock)
+                {
+                    foreach (var b in cpy)
                     {
                         this.bufferPool.MoveForFinalizeToForSend(b);
                     }
@@ -76,7 +79,7 @@ namespace NKafka
                 {
                     while (!ct.IsCancellationRequested)
                     {
-                        Task.Delay(TimeSpan.FromMilliseconds(50)).Wait(ct);
+                        Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
                     
                         List<Buffer> fs = null;
                         lock (forSendLock)
@@ -126,20 +129,20 @@ namespace NKafka
 
                         lock (availableLock)
                         {
-                            this.bufferPool.MakeAvailable(doneBuffer);
+                            this.bufferPool.InFlightToFreeForUse(doneBuffer);
                         }
                     }
                 }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
-        private Task StartBufferPoolTask(CancellationToken ct)
+        private Task StartBufferFinalizeTask(CancellationToken ct)
             => Task.Factory.StartNew(() =>
                 {
                     while (!ct.IsCancellationRequested)
                     {
-                        // Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
+                        Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
                         lock (producerLock)
                         {
-                            this.bufferPool.TransitionToForFinalize(this.config.LingerMs, this.config.BatchSize);
+                            this.bufferPool.ToForFinalizeIfRequired(this.config.LingerMs, this.config.BatchSize);
                             StartFinalizeAndSends();
                         }
                     }
@@ -150,12 +153,12 @@ namespace NKafka
             lock (producerLock)
             {
                 var tp = new TopicPartition(topic, 0);
-                var buffer = bufferPool.GetBuffer(tp, availableLock);
+                var buffer = bufferPool.GetFreeForUseBuffer(tp, availableLock);
                     
                 if (buffer.bufferCurrentPos + Buffer.MessageFixedOverhead + (key == null ? 0 : key.Length) + (value == null ? 0 : value.Length) > buffer.buffer.Length)
                 {
-                    this.bufferPool.MoveToForFinalize(tp);
-                    buffer = bufferPool.GetBuffer(tp, availableLock);
+                    this.bufferPool.FillingUpToForFinalize(tp);
+                    buffer = bufferPool.GetFreeForUseBuffer(tp, availableLock);
                 }
 
                 fixed (byte *b = buffer.buffer)
@@ -212,7 +215,6 @@ namespace NKafka
 
                     buffer.bufferCurrentPos = (int)(bufferEnd - b);
                 }
-                Console.WriteLine("Finalized");
             }
         }
         
@@ -221,11 +223,10 @@ namespace NKafka
             // 1. finalize everything.
             lock (producerLock)
             {
-                var cpy = new Dictionary<TopicPartition, Buffer>(this.bufferPool.Filling);
+                var cpy = new Dictionary<TopicPartition, Buffer>(this.bufferPool.FillingUp);
                 foreach (var v in cpy)
                 {
-                    Console.WriteLine("Flush -> for finalize");
-                    this.bufferPool.MoveToForFinalize(v.Key);
+                    this.bufferPool.FillingUpToForFinalize(v.Key);
                 }
                 StartFinalizeAndSends();
             }
@@ -233,22 +234,29 @@ namespace NKafka
             // 2. wait until the sent queue is empty.
             while (true)
             {
+                int forSendCount;
+                lock (forSendLock)
+                {
+                    forSendCount = this.bufferPool.ForSend.Count;
+                }
+
                 lock (producerLock)
                 {
-                    Console.WriteLine(this.bufferPool.InFlight.Count);
-                    if (this.bufferPool.InFlight.Count == 0)
+                    if (this.bufferPool.InFlight.Count == 0 && forSendCount == 0)
                     {
                         break;
                     }
                 }
-                Task.Delay(TimeSpan.FromMilliseconds(500)).Wait();
+                Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
             }
         }
 
         public void Dispose()
         {
-            bufferPoolCts.Cancel();
-            bufferPoolTask.Wait();
+            bufferFinalizeCts.Cancel();
+            bufferFinalizeTask.Wait();
+            networkCts.Cancel();
+            networkTask.Wait();
             client.Dispose();
         }
 
