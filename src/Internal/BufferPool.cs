@@ -15,23 +15,42 @@ namespace NKafka
             this.bufferSize = bufferSize;
         }
 
-        public Buffer GetFreeForUseBuffer(TopicPartition tp, object availableLockObj)
+        public Buffer GetFreeForUseBufferBlocking(TopicPartition tp, object freeForUseLockObj)
+        {
+            bool waited = false;
+            while (true)
+            {
+                var result = GetFreeForUseBuffer(tp, freeForUseLockObj);
+                if (result != null)
+                {
+                    if (waited)
+                    {
+                        // Console.WriteLine("blocked on buffer get");
+                    }
+                    return result;
+                }
+                waited = true;
+                Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
+            }
+        }
+
+        public Buffer GetFreeForUseBuffer(TopicPartition tp, object freeForUseLockObj)
         {
             if (fillingUp.TryGetValue(tp, out Buffer buf))
             {
                 return buf;
             }
 
-            lock (availableLockObj)
+            lock (freeForUseLockObj)
             {
                 if (freeForUse.Count == 0)
                 {
-                    this.freeForUse.Add(new Buffer(this.bufferSize));
-                    this.bufferCount += 1;
-                    if (this.bufferCount > 10)
+                    if (this.bufferCount > 50)
                     {
-                        throw new Exception("TODO: reminder to do something better about this");
+                        return null;
                     }
+                    this.bufferCount += 1;
+                    this.freeForUse.Add(new Buffer(this.bufferSize));
                 }
 
                 Buffer forUse = freeForUse[freeForUse.Count-1];
@@ -42,20 +61,20 @@ namespace NKafka
             }
         }
 
-        public void FillingUpToForFinalize(TopicPartition tp)
+        public void Move_FillingUp_To_ForFinalize(TopicPartition tp)
         {
             var b = fillingUp[tp];
             fillingUp.Remove(tp);
             forFinalize.Add(b);
         }
 
-        public void MoveForFinalizeToForSend(Buffer buffer)
+        public void Move_ForFinalize_To_ForSend(Buffer buffer)
         {
             forFinalize.Remove(buffer);
             forSend.Add(buffer);
         }
 
-        public void ToForFinalizeIfRequired(int lingerMs, int batchSize)
+        public void MoveToForFinalizeIfRequired(int lingerMs, int batchSize)
         {
             List<KeyValuePair<TopicPartition, Buffer>> toTransition = null;
             foreach (var kvp in fillingUp)
@@ -72,7 +91,7 @@ namespace NKafka
             }
         }
 
-        public void InFlightToFreeForUse(Buffer b)
+        public void Move_InFlight_To_FreeForUse(Buffer b)
         {
             inFlight.Remove(b);
             freeForUse.Add(b);

@@ -15,6 +15,7 @@
 // Refer to LICENSE for more information.
 
 using System;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -37,27 +38,28 @@ namespace NKafka
                 BootstrapServers = "localhost:9092",
                 ClientId = "test-client",
                 RequiredAcks = Acks.One,
-                RequestTimeoutMs = 10000
+                RequestTimeoutMs = 10000,
+                LingerMs = 0,
+                Logger = (message) => Console.WriteLine(message)
             };
 
+            int nMessages = 2000000;
             using (var p = new Producer(c, ack))
             {
-                for (int i=0; i<20; ++i)
+                var val = Encoding.UTF8.GetBytes("0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789");
+
+                var startTime = DateTime.Now.Ticks;
+                for (int i=0; i<nMessages; ++i)
                 {
-                    p.Produce("lala", null, Encoding.UTF8.GetBytes("AAAABBBBCCCC"));
+                    p.Produce("lala", null, val);
                 }
-
-                // p.Flush(TimeSpan.FromSeconds(10));
-
-                for (int i=0; i<20; ++i)
-                {
-                    p.Produce("lala", null, Encoding.UTF8.GetBytes("123 123"));
-                }
-
                 p.Flush(TimeSpan.FromSeconds(10));
+                var duration = DateTime.Now.Ticks - startTime;
+
+                Console.WriteLine($"Produced {nMessages} in {duration/10000.0:F0}ms");
+                Console.WriteLine($"{nMessages / (duration/10000.0):F0} messages/ms");
             }
         }
     
     }
-
 }

@@ -29,14 +29,14 @@ namespace NKafka
 
         private ProducerConfig config;
         private Client client;
-        private Task bufferFinalizeTask;
-        private CancellationTokenSource bufferFinalizeCts;
+        private Task finalizeTask;
+        private CancellationTokenSource finalizeTaskCts;
         private Task networkTask;
         private CancellationTokenSource networkCts;
         private callback ack;
         private object producerLock = new object();
         private object forSendLock = new object();
-        private object availableLock = new object();
+        private object freeForUseLock = new object();
         private BufferPool bufferPool;
         
         public Producer(ProducerConfig config, callback ack)
@@ -51,8 +51,8 @@ namespace NKafka
             this.networkCts = new CancellationTokenSource();
             this.networkTask = StartNetworkTask(networkCts.Token);
 
-            this.bufferFinalizeCts = new CancellationTokenSource();
-            this.bufferFinalizeTask = StartBufferFinalizeTask(bufferFinalizeCts.Token);
+            this.finalizeTaskCts = new CancellationTokenSource();
+            this.finalizeTask = StartBufferFinalizeTask(finalizeTaskCts.Token);
         }
 
         private void StartFinalizeAndSends()
@@ -68,7 +68,7 @@ namespace NKafka
                 {
                     foreach (var b in cpy)
                     {
-                        this.bufferPool.MoveForFinalizeToForSend(b);
+                        this.bufferPool.Move_ForFinalize_To_ForSend(b);
                     }
                 }
             }
@@ -80,7 +80,7 @@ namespace NKafka
                     while (!ct.IsCancellationRequested)
                     {
                         Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
-                    
+
                         List<Buffer> fs = null;
                         lock (forSendLock)
                         {
@@ -127,9 +127,9 @@ namespace NKafka
                             throw new Exception("Unexpected correlation id");
                         }
 
-                        lock (availableLock)
+                        lock (freeForUseLock)
                         {
-                            this.bufferPool.InFlightToFreeForUse(doneBuffer);
+                            this.bufferPool.Move_InFlight_To_FreeForUse(doneBuffer);
                         }
                     }
                 }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
@@ -142,7 +142,7 @@ namespace NKafka
                         Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
                         lock (producerLock)
                         {
-                            this.bufferPool.ToForFinalizeIfRequired(this.config.LingerMs, this.config.BatchSize);
+                            this.bufferPool.MoveToForFinalizeIfRequired(this.config.LingerMs, this.config.BatchSize);
                             StartFinalizeAndSends();
                         }
                     }
@@ -150,17 +150,20 @@ namespace NKafka
 
         public unsafe void Produce(string topic, byte[] key, byte[] value)
         {
+            var tp = new TopicPartition(topic, 0);
+            var buffer = bufferPool.GetFreeForUseBufferBlocking(tp, freeForUseLock);
+        
+            if (buffer.bufferCurrentPos + Buffer.MessageFixedOverhead + (key == null ? 0 : key.Length) + (value == null ? 0 : value.Length) > buffer.buffer.Length)
+            {
+                lock (producerLock)
+                {
+                    this.bufferPool.Move_FillingUp_To_ForFinalize(tp);
+                }
+                buffer = bufferPool.GetFreeForUseBufferBlocking(tp, freeForUseLock);
+            }
+
             lock (producerLock)
             {
-                var tp = new TopicPartition(topic, 0);
-                var buffer = bufferPool.GetFreeForUseBuffer(tp, availableLock);
-                    
-                if (buffer.bufferCurrentPos + Buffer.MessageFixedOverhead + (key == null ? 0 : key.Length) + (value == null ? 0 : value.Length) > buffer.buffer.Length)
-                {
-                    this.bufferPool.FillingUpToForFinalize(tp);
-                    buffer = bufferPool.GetFreeForUseBuffer(tp, availableLock);
-                }
-
                 fixed (byte *b = buffer.buffer)
                 {
                     if (buffer.bufferCurrentPos == 0)
@@ -226,7 +229,7 @@ namespace NKafka
                 var cpy = new Dictionary<TopicPartition, Buffer>(this.bufferPool.FillingUp);
                 foreach (var v in cpy)
                 {
-                    this.bufferPool.FillingUpToForFinalize(v.Key);
+                    this.bufferPool.Move_FillingUp_To_ForFinalize(v.Key);
                 }
                 StartFinalizeAndSends();
             }
@@ -253,8 +256,8 @@ namespace NKafka
 
         public void Dispose()
         {
-            bufferFinalizeCts.Cancel();
-            bufferFinalizeTask.Wait();
+            finalizeTaskCts.Cancel();
+            finalizeTask.Wait();
             networkCts.Cancel();
             networkTask.Wait();
             client.Dispose();

@@ -16,6 +16,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
 
 
@@ -23,6 +24,8 @@ namespace NKafka
 {
     public class ProducerConfig
     {
+        public delegate void LoggerDelegate(string message);
+
         public string BootstrapServers { get; set; } = "localhost:9092";
 
         internal byte[] clientId = new byte[] { 0, 6, 78, 75, 97, 102, 107, 97 }; // "NKafka"
@@ -49,8 +52,9 @@ namespace NKafka
 
         /// <summary>
         ///     TODO: allow override on a per topic level.
+        ///     Set the same a max message size.
         /// </summary>
-        public Int32 BufferMemoryBytes { get; set; } = 33554432;
+        public Int32 BufferMemoryBytes { get; set; } = 1000012;
 
         public CompressionType CompressionType { get; set; } = CompressionType.None;
 
@@ -61,5 +65,7 @@ namespace NKafka
         public Int32 ConnectionsMaxIdleMs { get; set; } = 540000;
 
         public Int32 LingerMs { get; set; } = 0;
+
+        public LoggerDelegate Logger { get; set; } = (message) => {};
     }
 }
