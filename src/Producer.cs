@@ -36,7 +36,11 @@ namespace NKafka
                 {
                     while (!ct.IsCancellationRequested)
                     {
-                        Task.Delay(TimeSpan.FromSeconds(30)).Wait();
+                        Task.Delay(TimeSpan.FromMilliseconds(20)).Wait();
+                        lock (producerLock)
+                        {
+                            // check if we need to send.
+                        }
                     }
                 }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
