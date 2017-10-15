@@ -44,9 +44,11 @@ namespace NKafka
             {
                 for (int i=0; i<100; ++i)
                 {
-                    p.Produce("lala", null, Encoding.UTF8.GetBytes("AAAABBBBCCCC"), ack);
+                    p.Produce("lala", null, Encoding.UTF8.GetBytes("AAAABBBBCCCC"));
                 }
 
+                p.Send(ack);
+                
                 p.Flush(TimeSpan.FromSeconds(10));
             }
         }
