@@ -46,6 +46,8 @@ namespace NKafka
 
         public TopicInfo[] TopicsInfo;
 
-        public Int32  ThrottleTime;
+        public Int32 ThrottleTime;
+        
+        public Int32 CorrelationId;
     }
 }

@@ -9,11 +9,19 @@ namespace NKafka
             this.buffer = new byte[bufferSize];
         }
 
+        public void Repurpose(TopicPartition tp, int correlationId)
+        {
+            this.topicPartition = tp;
+            this.bufferMessageCount = 0;
+            this.bufferCurrentPos = 0;
+            this.correlationId = correlationId;
+        }
+
+        public TopicPartition topicPartition;
         public byte[] buffer;
 
         public int bufferMessageCount;
         public int bufferCurrentPos;
-        public DateTime lastSent;
         public int correlationId;
 
         // A bunch of offsets into this.buffer that are requred to be populated
@@ -24,5 +32,13 @@ namespace NKafka
         public int crcOffset;
         public int recordCountOffset;
         public int attributesOffset;
+
+        /// <remarks>
+        ///     Should be plenty.
+        /// </remarks>
+        public const int MessageFixedOverhead = 100;
+
+        public override int GetHashCode()
+            => this.topicPartition.GetHashCode();
     }
 }

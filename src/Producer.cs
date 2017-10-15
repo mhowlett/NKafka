@@ -23,57 +23,148 @@ using System.Threading.Tasks;
 
 namespace NKafka
 {
-    public unsafe class Producer : IDisposable
+    public unsafe class Producer : IProducer, IDisposable
     {
+        public delegate void callback(ProduceResponse r);
+
         private ProducerConfig config;
         private Client client;
+        private Task bufferPoolTask;
+        private CancellationTokenSource bufferPoolCts;
+        private Task networkTask;
+        private CancellationTokenSource networkCts;
+        private callback ack;
+        private object producerLock = new object();
+        private object forSendLock = new object();
+        private object availableLock = new object();
+        private BufferPool bufferPool;
+        
+        public Producer(ProducerConfig config, callback ack)
+        {
+            this.config = config;
+            this.ack = ack;
 
-        private Task callbackTask;
-        private CancellationTokenSource callbackCts;
+            this.client = new Client(config.BootstrapServers);
 
-        private Task StartPollTask(CancellationToken ct)
+            this.bufferPool = new BufferPool(config.BufferMemoryBytes);
+
+            this.bufferPoolCts = new CancellationTokenSource();
+            this.bufferPoolTask = StartBufferPoolTask(bufferPoolCts.Token);
+
+            this.networkCts = new CancellationTokenSource();
+            this.networkTask = StartNetworkTask(networkCts.Token);
+        }
+
+        private void StartFinalizeAndSends()
+        {
+            if (this.bufferPool.ForFinalize.Count > 0)
+            {
+                var cpy = new List<Buffer>(this.bufferPool.ForFinalize);
+                foreach (var b in cpy)
+                {
+                    Finalize(b);
+                    lock (forSendLock)
+                    {
+                        this.bufferPool.MoveForFinalizeToForSend(b);
+                    }
+                }
+            }
+        }
+
+        private Task StartNetworkTask(CancellationToken ct)
             => Task.Factory.StartNew(() =>
                 {
                     while (!ct.IsCancellationRequested)
                     {
-                        Task.Delay(TimeSpan.FromMilliseconds(20)).Wait();
-                        lock (producerLock)
+                        Task.Delay(TimeSpan.FromMilliseconds(50)).Wait(ct);
+                    
+                        List<Buffer> fs = null;
+                        lock (forSendLock)
                         {
-                            // check if we need to send.
+                            if (this.bufferPool.ForSend.Count > 0)
+                            {
+                                fs = new List<Buffer>(this.bufferPool.ForSend);
+                                this.bufferPool.ForSend.Clear();
+                                this.bufferPool.InFlight.AddRange(fs);
+                            }                            
+                        }
+
+                        if (fs != null)
+                        {
+                            foreach (var b in fs)
+                            {
+                                client.Send(b.buffer, b.bufferCurrentPos);        
+                            }
+                        }
+
+                        if (!client.DataToReceive)
+                        {
+                            continue;
+                        }
+
+                        ProduceResponse pr;
+                        fixed (byte *bf = client.Receive())
+                        {   
+                            pr = ReadProduceResponse(bf);
+                            this.ack(pr);
+                        }
+
+                        Buffer doneBuffer = null;
+                        foreach (var b in this.bufferPool.InFlight)
+                        {
+                            if (b.correlationId == pr.CorrelationId)
+                            {
+                                doneBuffer = b;
+                                break;
+                            }
+                        }
+
+                        if (doneBuffer == null)
+                        {
+                            throw new Exception("Unexpected correlation id");
+                        }
+
+                        lock (availableLock)
+                        {
+                            this.bufferPool.MakeAvailable(doneBuffer);
                         }
                     }
                 }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
-        public Producer(ProducerConfig config)
-        {
-            this.config = config;
+        private Task StartBufferPoolTask(CancellationToken ct)
+            => Task.Factory.StartNew(() =>
+                {
+                    while (!ct.IsCancellationRequested)
+                    {
+                        // Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
+                        lock (producerLock)
+                        {
+                            this.bufferPool.TransitionToForFinalize(this.config.LingerMs, this.config.BatchSize);
+                            StartFinalizeAndSends();
+                        }
+                    }
+                }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
-            this.client = new Client(config.BootstrapServers);
-
-            this.callbackCts = new CancellationTokenSource();
-            this.callbackTask = StartPollTask(callbackCts.Token);
-
-            this.bufferPool = new BufferPool(config.BufferMemoryBytes);
-        }
-
-        public delegate void ack(ProduceResponse r);
-
-        private object producerLock = new object();
-
-        private BufferPool bufferPool;
-        
         public unsafe void Produce(string topic, byte[] key, byte[] value)
         {
             lock (producerLock)
             {
-                var buffer = bufferPool.Get(new TopicPartition(topic, 0));
+                var tp = new TopicPartition(topic, 0);
+                var buffer = bufferPool.GetBuffer(tp, availableLock);
+                    
+                if (buffer.bufferCurrentPos + Buffer.MessageFixedOverhead + (key == null ? 0 : key.Length) + (value == null ? 0 : value.Length) > buffer.buffer.Length)
+                {
+                    this.bufferPool.MoveToForFinalize(tp);
+                    buffer = bufferPool.GetBuffer(tp, availableLock);
+                }
+
                 fixed (byte *b = buffer.buffer)
                 {
                     if (buffer.bufferCurrentPos == 0)
                     {
                         byte* requestSizePtr;
                         byte* messageSetSizePtr;
-                        byte *currentPosPtr = this.WriteProduceRequestHeader(b, topic, out requestSizePtr, out messageSetSizePtr);
+                        byte *currentPosPtr = this.WriteProduceRequestHeader(b, topic, buffer.correlationId, out requestSizePtr, out messageSetSizePtr);
                         buffer.requestSizeOffset = (int)(requestSizePtr-b);
                         buffer.messageSetSizeOffset = (int)(messageSetSizePtr-b);
 
@@ -97,10 +188,8 @@ namespace NKafka
             }
         }
 
-        public void Send(string topic, ack ack)
+        private void Finalize(Buffer buffer)
         {
-            Buffer buffer = this.bufferPool.Get(new TopicPartition(topic, 0));
-
             lock (producerLock)
             {
                 fixed (byte *b = buffer.buffer)
@@ -123,31 +212,47 @@ namespace NKafka
 
                     buffer.bufferCurrentPos = (int)(bufferEnd - b);
                 }
-
-                client.Send(buffer.buffer, buffer.bufferCurrentPos);
-
-                fixed (byte *b = client.Receive())
-                {
-                    ack(ReadProduceResponse(b));
-                }
+                Console.WriteLine("Finalized");
             }
         }
-
+        
         public void Flush(TimeSpan timeoutMilliseconds)
         {
+            // 1. finalize everything.
+            lock (producerLock)
+            {
+                var cpy = new Dictionary<TopicPartition, Buffer>(this.bufferPool.Filling);
+                foreach (var v in cpy)
+                {
+                    Console.WriteLine("Flush -> for finalize");
+                    this.bufferPool.MoveToForFinalize(v.Key);
+                }
+                StartFinalizeAndSends();
+            }
+
+            // 2. wait until the sent queue is empty.
+            while (true)
+            {
+                lock (producerLock)
+                {
+                    Console.WriteLine(this.bufferPool.InFlight.Count);
+                    if (this.bufferPool.InFlight.Count == 0)
+                    {
+                        break;
+                    }
+                }
+                Task.Delay(TimeSpan.FromMilliseconds(500)).Wait();
+            }
         }
 
         public void Dispose()
         {
-            lock (producerLock)
-            {
-                callbackCts.Cancel();
-                callbackTask.Wait();
-                client.Dispose();
-            }
+            bufferPoolCts.Cancel();
+            bufferPoolTask.Wait();
+            client.Dispose();
         }
 
-        public byte* WriteProduceRequestHeader(byte* b, string topic, out byte* requestSizePtr, out byte* messageSetSizePtr)
+        public byte* WriteProduceRequestHeader(byte* b, string topic, Int32 correlationId, out byte* requestSizePtr, out byte* messageSetSizePtr)
         {
             const Int16 ApiVersion = 3;
 
@@ -172,7 +277,7 @@ namespace NKafka
             b += 4;                                                                    // Space for Size: fill in at end.
             *((Int16 *)b) = IPAddress.HostToNetworkOrder((Int16)ReadWriteUtils.ApiKeys.ProduceRequest); b += 2;  // ApiKey
             *((Int16 *)b) = IPAddress.HostToNetworkOrder(ApiVersion); b += 2;          // ApiVersion
-            *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)3); b += 4;            // CorrelationId
+            *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)correlationId); b += 4;            // CorrelationId
             for (int i=0; i<this.config.clientId.Length; ++i)                          // ClientId
             {
                 *b++ = this.config.clientId[i];
@@ -313,7 +418,7 @@ namespace NKafka
             //   ThrottleTime => int32
             
             ProduceResponse result = new ProduceResponse();
-            Int32 correlationId = IPAddress.NetworkToHostOrder(*((Int32 *)b)); b += 4;
+            result.CorrelationId = IPAddress.NetworkToHostOrder(*((Int32 *)b)); b += 4;
             Int32 topicsLen = IPAddress.NetworkToHostOrder(*((Int32 *)b)); b += 4;
             result.TopicsInfo = new ProduceResponse.TopicInfo[topicsLen];
             for (int i=0; i<topicsLen; ++i)

@@ -40,15 +40,13 @@ namespace NKafka
                 RequestTimeoutMs = 10000
             };
 
-            using (var p = new Producer(c))
+            using (var p = new Producer(c, ack))
             {
                 for (int i=0; i<20; ++i)
                 {
                     p.Produce("lala", null, Encoding.UTF8.GetBytes("AAAABBBBCCCC"));
                 }
 
-                p.Send("lala", ack);
-                
                 p.Flush(TimeSpan.FromSeconds(10));
             }
         }

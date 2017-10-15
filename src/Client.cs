@@ -39,7 +39,7 @@ namespace NKafka
         private Socket ConnectSocket(string server, int port)
         {
             IPHostEntry hostEntry = Dns.GetHostEntryAsync(server).Result;
-            
+
             // Loop through the AddressList to obtain the supported AddressFamily. This is to avoid
             // an exception that occurs when the host IP Address is not compatible with the address family
             // (typical in the IPv6 case).
@@ -75,6 +75,14 @@ namespace NKafka
         {
             // Send request to the server.
             this.socket.Send(bs, 0, size, SocketFlags.None);
+        }
+
+        public bool DataToReceive
+        {
+            get 
+            {
+                return this.socket.Available > 0;
+            }
         }
 
         public byte[] Receive()
