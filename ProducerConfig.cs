@@ -23,7 +23,7 @@ namespace NKafka
 {
     public class ProducerConfig
     {
-        public string BootstrapServers { get; set; }
+        public string BootstrapServers { get; set; } = "localhost:9092";
 
         internal byte[] clientId = new byte[] { 0, 6, 78, 75, 97, 102, 107, 97 }; // "NKafka"
 
@@ -43,12 +43,34 @@ namespace NKafka
             }
         }
 
-        public Acks RequiredAcks { get; set; }
+        public Acks RequiredAcks { get; set; } = Acks.One;
 
-        public Int32 MaxMessageSize { get; set; }
+        public Int32 RequestTimeoutMs { get; set; } = 30000;
 
-        public Int32 RequestTimeoutMilliseconds { get; set; }
+        /// <summary>
+        ///     The total bytes of memory the producer can use to buffer records waiting 
+        ///     to be sent to the server. If records are sent faster than they can be 
+        ///     delivered to the server the producer will block for max.block.ms after 
+        ///     which it will throw an exception.
+        /// 
+        ///     This setting should correspond roughly to the total memory the producer 
+        ///     will use, but is not a hard bound since not all memory the producer uses 
+        ///     is used for buffering. Some additional memory will be used for compression 
+        ///     (if compression is enabled) as well as for maintaining in-flight requests.
+        /// </summary>
+        public Int32 BufferMemoryBytes { get; set; } = 33554432;
 
-        public Partitioner Partitioner { get; set; }
+        /// <summary>
+        ///     Compression not currently implemented.
+        /// </summary>
+        public CompressionType CompressionType { get; set; } = CompressionType.None;
+
+        public Int32 Retries { get; set; } = 0;
+
+        public Int32 BatchSize { get; set; } = 16384;
+
+        public Int32 ConnectionsMaxIdleMs { get; set; } = 540000;
+
+        public Int32 LingerMs { get; set; } = 0;
     }
 }

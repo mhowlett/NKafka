@@ -25,25 +25,32 @@ namespace NKafka
 {
     class Program
     {
+        static void ack(ProduceResponse r)
+        {
+            Console.WriteLine(r.TopicsInfo[0].PartitionsInfo[0].Offset);
+        }
+
         unsafe static void Main(string[] args)
         {
-            var headers = new Headers();
-            headers.AddHeader("my-test-header", "sdf");
-
             var c = new ProducerConfig
             { 
                 BootstrapServers = "localhost:9092",
                 ClientId = "test-client",
                 RequiredAcks = Acks.One,
-                MaxMessageSize = 1024,
-                RequestTimeoutMilliseconds = 10000
+                RequestTimeoutMs = 10000
             };
 
             using (var p = new Producer(c))
             {
-                var r = p.Produce("test-topic-1", null, Encoding.UTF8.GetBytes("AAAABBBBCCCC"));
+                for (int i=0; i<100; ++i)
+                {
+                    p.Produce("lala", null, Encoding.UTF8.GetBytes("AAAABBBBCCCC"), ack);
+                }
+
                 p.Flush(TimeSpan.FromSeconds(10));
             }
         }
+    
     }
+
 }

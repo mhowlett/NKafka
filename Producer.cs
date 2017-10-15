@@ -29,35 +29,90 @@ namespace NKafka
         public Producer(ProducerConfig config)
         {
             this.config = config;
+
             this.client = new Client(config.BootstrapServers);
+            this.buffer = new byte[config.BufferMemoryBytes];
+            this.bufferMessageCount = 0;
+            this.bufferCurrentPos = 0;
         }
 
-        public unsafe ProduceResponse Produce(
-            string topic, 
-            int keyLen, byte* key, 
-            int valueLen, byte* value, 
-            long timestamp, 
-            Dictionary<string, byte[]> headers)
+        public delegate void ack(ProduceResponse r);
+
+        private object producerLock = new object();
+
+        private byte[] buffer;
+        private int bufferMessageCount;
+        private int bufferCurrentPos;
+
+        private int RequestSizeOffset;
+        private int MessageSetSizeOffset;
+        private int LengthOffset;
+        private int CrcOffset;
+        private int RecordCountOffset;
+        private int AttributesOffset;
+
+        public unsafe void Produce(string topic, byte[] key, byte[] value, ack ack)
         {
-            return null;
+            lock (producerLock)
+            {
+                if (bufferCurrentPos == 0)
+                {
+                    fixed (byte *b = this.buffer)
+                    {
+                        RequestSizeOffset = 0;
+                        byte *currentPosPtr = this.WriteProduceRequestHeader(b, topic);
+                        MessageSetSizeOffset = (int)(currentPosPtr-b);
+                        currentPosPtr += 4; // space for message set size.
+
+                        byte* lengthPtr;
+                        byte* crcPtr;
+                        byte* recordCountPtr;
+                        byte* attributesPtr;
+                        currentPosPtr = this.WriteRecordBatchHeader(currentPosPtr, out lengthPtr, out crcPtr, out attributesPtr, out recordCountPtr);
+
+                        LengthOffset = (int)(lengthPtr-b);
+                        CrcOffset = (int)(crcPtr-b);
+                        AttributesOffset = (int)(attributesPtr-b);
+                        RecordCountOffset = (int)(recordCountPtr-b);
+
+                        bufferCurrentPos = (int)(currentPosPtr-b);
+                    }
+                }
+
+                fixed (byte *b = this.buffer)
+                {
+                    byte* start = b + bufferCurrentPos;
+                    byte* currentPosPtr = WriteRecord(start, key, value);
+
+                    byte* requestSizePtr = b + RequestSizeOffset;
+                    byte* messageSetSizePtr = b + MessageSetSizeOffset;
+                    byte* lengthPtr = b + LengthOffset;
+                    byte* crcPtr = b + CrcOffset;
+                    byte* recordCountPtr = b + RecordCountOffset;
+                    byte* attributesPtr = b + AttributesOffset;
+
+                    *((Int32 *)messageSetSizePtr) = IPAddress.HostToNetworkOrder((int)(currentPosPtr - messageSetSizePtr) - 4);  
+                    *((Int32 *)requestSizePtr) = IPAddress.HostToNetworkOrder((int)(currentPosPtr - b) - 4);
+                    *((Int32 *)lengthPtr) = IPAddress.HostToNetworkOrder((int)(currentPosPtr - lengthPtr - 4));
+                    *((Int32 *)recordCountPtr) = IPAddress.HostToNetworkOrder((int)1);
+                    var crc = Crc32Provider.ComputeHash(attributesPtr, 0, (int)(currentPosPtr-attributesPtr));
+                    for (int i=0; i<crc.Length; ++i) *crcPtr++ = crc[i];
+
+                    bufferCurrentPos = (int)(currentPosPtr - b);
+                }
+
+                client.Send(this.buffer, this.bufferCurrentPos);
+
+                fixed (byte *b = client.Receive())
+                {
+                    ack(ReadProduceResponse(b));
+                }
+            }
         }
 
-        public unsafe ProduceResponse Produce(string topic, byte[] key, byte[] value)
+        public void Send()
         {
-            byte[] bs = new byte[2048];
-            int size = 0;
-            fixed (byte *b = bs)
-            {
-                byte* end = this.WriteProduceRequest(b, topic, key, value);
-                size = (int)(end-b);
-            }
 
-            client.Send(bs, size);
-
-            fixed (byte *b = client.Receive())
-            {
-                return ReadProduceResponse(b);
-            }
         }
 
         public void Flush(TimeSpan timeoutMilliseconds)
@@ -66,10 +121,13 @@ namespace NKafka
 
         public void Dispose()
         {
-            client.Dispose();
+            lock (producerLock)
+            {
+                client.Dispose();
+            }
         }
 
-        public byte* WriteProduceRequest(byte* b, string topic, byte[] key, byte[] value)
+        public byte* WriteProduceRequestHeader(byte* b, string topic)
         {
             const Int16 ApiVersion = 3;
 
@@ -96,7 +154,7 @@ namespace NKafka
             *((Int16 *)b) = IPAddress.HostToNetworkOrder(ApiVersion); b += 2;          // ApiVersion
             *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)3); b += 4;            // CorrelationId
             for (int i=0; i<this.config.clientId.Length; ++i)                          // ClientId
-            { 
+            {
                 *b++ = this.config.clientId[i];
             }
             b = ReadWriteUtils.WriteString(b, null);                                   // TransactionalId - WTF?
@@ -106,12 +164,50 @@ namespace NKafka
             b = ReadWriteUtils.WriteString(b, topic);                                  // TopicName
             *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)1); b += 4;            // PartitionCount
             *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)0); b += 4;            // Partition
-            byte* msSize = b;
-            *((Int32 *)b) = 0; b += 4;                                                 // MessageSetSize
-            b = WriteRecordBatch(b, key, value);                                       // MessageSet
-            *((Int32 *)msSize) = IPAddress.HostToNetworkOrder((int)(b - msSize) - 4);  
-            *((Int32 *)start) = IPAddress.HostToNetworkOrder((int)(b - start) - 4);
 
+            return b;
+        }
+
+        private byte* WriteRecordBatchHeader(byte *b, out byte* length, out byte* crcStart, out byte* attributesOffset, out byte* recordCount)
+        {
+            long now = Timestamp.DateTimeToUnixTimestampMs(DateTime.Now);
+
+            // RecordBatch =>
+            //   FirstOffset => int64
+            //   Length => int32 (in bytes)
+            //   PartitionLeaderEpoch => int32
+            //   Magic => int8
+            //   CRC => int32
+            //   Attributes => int16
+            //   LastOffsetDelta => int32
+            //   FirstTimestamp => int64
+            //   MaxTimestamp => int64
+            //   ProducerId => int64
+            //   ProducerEpoch => int16
+            //   FirstSequence => int32
+            //   Records => [Record]
+
+            const byte MagicValue = 2;
+
+            byte* start = b;
+            *((Int64 *)b) = 0; b += 8;                                    // FirstOffset
+            length = b;
+            *((Int32 *)b) = 0; b += 4;                                    // Length (in bytes, update later)
+            *((Int32 *)b) = 0; b += 4;                                    // PartitionLeaderEpoch
+            *b++ = MagicValue;                                            // Magic
+            crcStart = b;
+            *((Int32 *)b) = 0; b += 4;                                    // CRC (updated later)
+            attributesOffset = b;
+            *((Int16 *)b) = 0; b += 2;                                    // Attributes
+            *((Int32 *)b) = 0; b += 4;                                    // LastOffsetDelta (with one message, will be 0)
+            *((Int64 *)b) = IPAddress.HostToNetworkOrder(now); b += 8;    // FirstTimestamp
+            *((Int64 *)b) = IPAddress.HostToNetworkOrder(now); b += 8;    // MaxTimestamp
+            *((Int64 *)b) = -1; b += 8;                                   // ProducerId (not required unless implementing idempotent)
+            *((Int16 *)b) = 0;  b += 2;                                   // ProducerEpoch (not required unless implementing idempotent)
+            *((Int32 *)b) = IPAddress.HostToNetworkOrder(-1); b += 4;     // FirstSequence (not required unless implementing idempotent)
+            recordCount = b;
+            *((Int32 *)b) = IPAddress.HostToNetworkOrder(0); b += 4;      // Record count (update later)
+            
             return b;
         }
 
