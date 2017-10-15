@@ -53,6 +53,7 @@ namespace NKafka
             this.buffer = new byte[config.BufferMemoryBytes];
             this.bufferMessageCount = 0;
             this.bufferCurrentPos = 0;
+            this.correlationId = 1;
 
             this.callbackCts = new CancellationTokenSource();
             this.callbackTask = StartPollTask(callbackCts.Token);
@@ -62,9 +63,22 @@ namespace NKafka
 
         private object producerLock = new object();
 
+        internal class BufferPool
+        {
+            public BufferPool()
+            {
+
+            }
+
+
+        }
+        
         private byte[] buffer;
+
         private int bufferMessageCount;
         private int bufferCurrentPos;
+        private DateTime lastSent;
+        private int correlationId;
 
         // A bunch of offsets into buffer that are requred to finalize the message.
         private int requestSizeOffset;
