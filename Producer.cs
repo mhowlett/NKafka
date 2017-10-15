@@ -44,12 +44,13 @@ namespace NKafka
         private int bufferMessageCount;
         private int bufferCurrentPos;
 
-        private int RequestSizeOffset;
-        private int MessageSetSizeOffset;
-        private int LengthOffset;
-        private int CrcOffset;
-        private int RecordCountOffset;
-        private int AttributesOffset;
+        // A bunch of offsets into buffer that are requred to finalize the message.
+        private int requestSizeOffset;
+        private int messageSetSizeOffset;
+        private int lengthOffset;
+        private int crcOffset;
+        private int recordCountOffset;
+        private int attributesOffset;
 
         public unsafe void Produce(string topic, byte[] key, byte[] value)
         {
@@ -59,61 +60,63 @@ namespace NKafka
                 {
                     if (bufferCurrentPos == 0)
                     {
-                        RequestSizeOffset = 0;
-                        byte *currentPosPtr = this.WriteProduceRequestHeader(b, topic);
-                        MessageSetSizeOffset = (int)(currentPosPtr-b);
-                        currentPosPtr += 4; // space for message set size.
+                        byte* requestSizePtr;
+                        byte* messageSetSizePtr;
+                        byte *currentPosPtr = this.WriteProduceRequestHeader(b, topic, out requestSizePtr, out messageSetSizePtr);
+                        requestSizeOffset = (int)(requestSizePtr-b);
+                        messageSetSizeOffset = (int)(messageSetSizePtr-b);
 
                         byte* lengthPtr;
                         byte* crcPtr;
                         byte* recordCountPtr;
                         byte* attributesPtr;
                         currentPosPtr = this.WriteRecordBatchHeader(currentPosPtr, out lengthPtr, out crcPtr, out attributesPtr, out recordCountPtr);
-
-                        LengthOffset = (int)(lengthPtr-b);
-                        CrcOffset = (int)(crcPtr-b);
-                        AttributesOffset = (int)(attributesPtr-b);
-                        RecordCountOffset = (int)(recordCountPtr-b);
+                        lengthOffset = (int)(lengthPtr-b);
+                        crcOffset = (int)(crcPtr-b);
+                        attributesOffset = (int)(attributesPtr-b);
+                        recordCountOffset = (int)(recordCountPtr-b);
 
                         bufferCurrentPos = (int)(currentPosPtr-b);
                     }
 
-                    byte* start = b + bufferCurrentPos;
-                    byte* ptr = WriteRecord(start, key, value);
-                    bufferCurrentPos = (int)(ptr-b);
                     bufferMessageCount += 1;
+                    byte* end = WriteRecord(b + bufferCurrentPos, key, value);
+                    bufferCurrentPos = (int)(end-b);
                 }
             }
         }
 
         public void Send(ack ack)
         {
-            fixed (byte *b = this.buffer)
+            lock (producerLock)
             {
-                byte* bufferEnd = b + bufferCurrentPos;
+                fixed (byte *b = this.buffer)
+                {
+                    byte* bufferEnd = b + bufferCurrentPos;
 
-                byte* requestSizePtr = b + RequestSizeOffset;
-                byte* messageSetSizePtr = b + MessageSetSizeOffset;
-                byte* lengthPtr = b + LengthOffset;
-                byte* crcPtr = b + CrcOffset;
-                byte* recordCountPtr = b + RecordCountOffset;
-                byte* attributesPtr = b + AttributesOffset;
+                    byte* requestSizePtr = b + requestSizeOffset;
+                    byte* messageSetSizePtr = b + messageSetSizeOffset;
+                    byte* lengthPtr = b + lengthOffset;
+                    byte* crcPtr = b + crcOffset;
+                    byte* recordCountPtr = b + recordCountOffset;
+                    byte* attributesPtr = b + attributesOffset;
 
-                *((Int32 *)messageSetSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - messageSetSizePtr) - 4);  
-                *((Int32 *)requestSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - b) - 4);
-                *((Int32 *)lengthPtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - lengthPtr - 4));
-                *((Int32 *)recordCountPtr) = IPAddress.HostToNetworkOrder((int)this.bufferMessageCount);
-                var crc = Crc32Provider.ComputeHash(attributesPtr, 0, (int)(bufferEnd-attributesPtr));
-                for (int i=0; i<crc.Length; ++i) *crcPtr++ = crc[i];
+                    *((Int32 *)messageSetSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - messageSetSizePtr) - 4);  
+                    *((Int32 *)requestSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - b) - 4);
+                    *((Int32 *)lengthPtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - lengthPtr - 4));
+                    *((Int32 *)recordCountPtr) = IPAddress.HostToNetworkOrder((int)this.bufferMessageCount);
+                    var crc = Crc32Provider.ComputeHash(attributesPtr, 0, (int)(bufferEnd-attributesPtr));
+                    for (int i=0; i<crc.Length; ++i) *crcPtr++ = crc[i];
 
-                bufferCurrentPos = (int)(bufferEnd - b);
-            }
+                    bufferCurrentPos = (int)(bufferEnd - b);
+                }
 
-            client.Send(this.buffer, this.bufferCurrentPos);
+                client.Send(this.buffer, this.bufferCurrentPos);
 
-            fixed (byte *b = client.Receive())
-            {
-                ack(ReadProduceResponse(b));
+                fixed (byte *b = client.Receive())
+                {
+                    ack(ReadProduceResponse(b));
+                }
             }
         }
 
@@ -129,7 +132,7 @@ namespace NKafka
             }
         }
 
-        public byte* WriteProduceRequestHeader(byte* b, string topic)
+        public byte* WriteProduceRequestHeader(byte* b, string topic, out byte* requestSizePtr, out byte* messageSetSizePtr)
         {
             const Int16 ApiVersion = 3;
 
@@ -150,8 +153,8 @@ namespace NKafka
             //   Partition => int32
             //   MessageSetSize => int32
 
-            byte* start = b;
-            *((Int32 *)b) = 0; b += 4;                                                 // Size: fill in at end.
+            requestSizePtr = b;
+            b += 4;                                                                    // Space for Size: fill in at end.
             *((Int16 *)b) = IPAddress.HostToNetworkOrder((Int16)ReadWriteUtils.ApiKeys.ProduceRequest); b += 2;  // ApiKey
             *((Int16 *)b) = IPAddress.HostToNetworkOrder(ApiVersion); b += 2;          // ApiVersion
             *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)3); b += 4;            // CorrelationId
@@ -160,13 +163,14 @@ namespace NKafka
                 *b++ = this.config.clientId[i];
             }
             b = ReadWriteUtils.WriteString(b, null);                                   // TransactionalId - WTF?
-            *((Int16 *)b) = IPAddress.HostToNetworkOrder((Int16)(1)); b += 2;          // RequiredAcks
-            *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)5000); b += 4;         // Timeout
+            *((Int16 *)b) = IPAddress.HostToNetworkOrder((Int16)(config.RequiredAcks)); b += 2; // RequiredAcks
+            *((Int32 *)b) = IPAddress.HostToNetworkOrder(config.RequestTimeoutMs); b += 4; // Timeout
             *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)1); b += 4;            // TopicCount
             b = ReadWriteUtils.WriteString(b, topic);                                  // TopicName
             *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)1); b += 4;            // PartitionCount
             *((Int32 *)b) = IPAddress.HostToNetworkOrder((Int32)0); b += 4;            // Partition
-
+            messageSetSizePtr = b;
+            b += 4;                                                                    // Space for message set size.
             return b;
         }
 
@@ -194,11 +198,11 @@ namespace NKafka
             byte* start = b;
             *((Int64 *)b) = 0; b += 8;                                    // FirstOffset
             length = b;
-            *((Int32 *)b) = 0; b += 4;                                    // Length (in bytes, update later)
+            b += 4;                                                       // Length (in bytes, update later)
             *((Int32 *)b) = 0; b += 4;                                    // PartitionLeaderEpoch
             *b++ = MagicValue;                                            // Magic
             crcStart = b;
-            *((Int32 *)b) = 0; b += 4;                                    // CRC (updated later)
+            b += 4;                                                       // CRC (updated later)
             attributesOffset = b;
             *((Int16 *)b) = 0; b += 2;                                    // Attributes
             *((Int32 *)b) = 0; b += 4;                                    // LastOffsetDelta (with one message, will be 0)
@@ -208,7 +212,7 @@ namespace NKafka
             *((Int16 *)b) = 0;  b += 2;                                   // ProducerEpoch (not required unless implementing idempotent)
             *((Int32 *)b) = IPAddress.HostToNetworkOrder(-1); b += 4;     // FirstSequence (not required unless implementing idempotent)
             recordCount = b;
-            *((Int32 *)b) = IPAddress.HostToNetworkOrder(0); b += 4;      // Record count (update later)
+            b += 4;                                                       // Record count (update later)
             
             return b;
         }

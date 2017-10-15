@@ -47,22 +47,8 @@ namespace NKafka
 
         public Int32 RequestTimeoutMs { get; set; } = 30000;
 
-        /// <summary>
-        ///     The total bytes of memory the producer can use to buffer records waiting 
-        ///     to be sent to the server. If records are sent faster than they can be 
-        ///     delivered to the server the producer will block for max.block.ms after 
-        ///     which it will throw an exception.
-        /// 
-        ///     This setting should correspond roughly to the total memory the producer 
-        ///     will use, but is not a hard bound since not all memory the producer uses 
-        ///     is used for buffering. Some additional memory will be used for compression 
-        ///     (if compression is enabled) as well as for maintaining in-flight requests.
-        /// </summary>
         public Int32 BufferMemoryBytes { get; set; } = 33554432;
 
-        /// <summary>
-        ///     Compression not currently implemented.
-        /// </summary>
         public CompressionType CompressionType { get; set; } = CompressionType.None;
 
         public Int32 Retries { get; set; } = 0;
