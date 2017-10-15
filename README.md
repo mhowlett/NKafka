@@ -1,11 +1,29 @@
 
 ## NKafka
 
-This is an experimental client for Apache Kafka. The ideas I'm trying out may not work.
+This is an experimental .NET client for Apache Kafka.
 
-NKafka pulls a lot of stuff in from Confluent.Kafka - this is primarily a rewrite of the backend in managed code.
+It pulls a lot of stuff in from Confluent.Kafka - this is primarily a rewrite of the backend in managed code.
 
-Status: passed third milestone: able to produce a batch of V2 messages successfully managed by background thread. No Consumer functionality yet.
+### Status
+
+Able to produce batches of V2 messages, with multiple requests in flight, managed by a background thread. Metadata
+requests are implemented but not incorporated yet. Only works with a single partition. Definitely not yet ready for prime time.
+
+No Consumer yet.
+
+### Benchmarks 
+
+I ran a simple test producing 5,000,000 100 byte messages to localhost on my mac book pro. 
+
+THE TEST IS NOT FAIR since NKafka is incomplete and isn't doing as much, but I don't think it will get too much slower.
+
+Results:
+
+- NKafka: 170k messages/s
+- Confluent.Kafka [Task]: 53k messages/s
+- Confluent.Kafka [DeliveryHandler]: 62k messages/s
+
 
 ### Example
 
