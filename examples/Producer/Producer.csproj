@@ -5,4 +5,8 @@
     <TargetFramework>netcoreapp1.1</TargetFramework>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../../src/NKafka.csproj" />
+  </ItemGroup>
+
 </Project>

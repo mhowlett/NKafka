@@ -36,7 +36,7 @@ namespace NKafka
                 {
                     while (!ct.IsCancellationRequested)
                     {
-                        Thread.Sleep(25);
+                        Task.Delay(TimeSpan.FromSeconds(30)).Wait();
                     }
                 }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
