@@ -55,21 +55,21 @@ namespace NKafka
             this.finalizeTask = StartBufferFinalizeTask(finalizeTaskCts.Token);
         }
 
-        private void StartFinalizeAndSends()
+        private void FinalizeAndSend()
         {
             if (this.bufferPool.ForFinalize.Count > 0)
             {
-                var cpy = new List<Buffer>(this.bufferPool.ForFinalize);
-                foreach (var b in cpy)
+                foreach (var b in this.bufferPool.ForFinalize)
                 {
                     Finalize(b);
                 }
                 lock (forSendLock)
                 {
-                    foreach (var b in cpy)
+                    foreach (var b in this.bufferPool.ForFinalize)
                     {
-                        this.bufferPool.Move_ForFinalize_To_ForSend(b);
+                        this.bufferPool.ForSend.Add(b);
                     }
+                    this.bufferPool.ForFinalize.Clear();
                 }
             }
         }
@@ -143,7 +143,7 @@ namespace NKafka
                         lock (producerLock)
                         {
                             this.bufferPool.MoveToForFinalizeIfRequired(this.config.LingerMs, this.config.BatchSize);
-                            StartFinalizeAndSends();
+                            FinalizeAndSend();
                         }
                     }
                 }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
@@ -231,7 +231,7 @@ namespace NKafka
                 {
                     this.bufferPool.Move_FillingUp_To_ForFinalize(v.Key);
                 }
-                StartFinalizeAndSends();
+                FinalizeAndSend();
             }
 
             // 2. wait until the sent queue is empty.
