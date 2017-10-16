@@ -172,6 +172,7 @@ namespace NKafka
                     }
                 }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
+        
         public unsafe void Produce(string topic, byte[] key, byte[] value)
         {
             var tp = new TopicPartition(topic, 0);
@@ -217,33 +218,6 @@ namespace NKafka
                 }
             }
         }
-
-        private void Finalize(Buffer buffer)
-        {
-            lock (producerLock)
-            {
-                fixed (byte *b = buffer.buffer)
-                {
-                    byte* bufferEnd = b + buffer.bufferCurrentPos;
-
-                    byte* requestSizePtr = b + buffer.requestSizeOffset;
-                    byte* messageSetSizePtr = b + buffer.messageSetSizeOffset;
-                    byte* lengthPtr = b + buffer.lengthOffset;
-                    byte* crcPtr = b + buffer.crcOffset;
-                    byte* recordCountPtr = b + buffer.recordCountOffset;
-                    byte* attributesPtr = b + buffer.attributesOffset;
-
-                    *((Int32 *)messageSetSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - messageSetSizePtr) - 4);  
-                    *((Int32 *)requestSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - b) - 4);
-                    *((Int32 *)lengthPtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - lengthPtr - 4));
-                    *((Int32 *)recordCountPtr) = IPAddress.HostToNetworkOrder((int)buffer.bufferMessageCount);
-                    var crc = Crc32Provider.ComputeHash(attributesPtr, 0, (int)(bufferEnd-attributesPtr));
-                    for (int i=0; i<crc.Length; ++i) *crcPtr++ = crc[i];
-
-                    buffer.bufferCurrentPos = (int)(bufferEnd - b);
-                }
-            }
-        }
         
         public void Flush(TimeSpan timeoutMilliseconds)
         {
@@ -282,12 +256,41 @@ namespace NKafka
         {
             finalizeTaskCts.Cancel();
             finalizeTask.Wait();
+
             networkCts.Cancel();
             networkTask.Wait();
+            
             client.Dispose();
         }
 
-        public byte* WriteProduceRequestHeader(byte* b, string topic, Int32 correlationId, out byte* requestSizePtr, out byte* messageSetSizePtr)
+        private void Finalize(Buffer buffer)
+        {
+            lock (producerLock)
+            {
+                fixed (byte *b = buffer.buffer)
+                {
+                    byte* bufferEnd = b + buffer.bufferCurrentPos;
+
+                    byte* requestSizePtr = b + buffer.requestSizeOffset;
+                    byte* messageSetSizePtr = b + buffer.messageSetSizeOffset;
+                    byte* lengthPtr = b + buffer.lengthOffset;
+                    byte* crcPtr = b + buffer.crcOffset;
+                    byte* recordCountPtr = b + buffer.recordCountOffset;
+                    byte* attributesPtr = b + buffer.attributesOffset;
+
+                    *((Int32 *)messageSetSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - messageSetSizePtr) - 4);  
+                    *((Int32 *)requestSizePtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - b) - 4);
+                    *((Int32 *)lengthPtr) = IPAddress.HostToNetworkOrder((int)(bufferEnd - lengthPtr - 4));
+                    *((Int32 *)recordCountPtr) = IPAddress.HostToNetworkOrder((int)buffer.bufferMessageCount);
+                    var crc = Crc32Provider.ComputeHash(attributesPtr, 0, (int)(bufferEnd-attributesPtr));
+                    for (int i=0; i<crc.Length; ++i) *crcPtr++ = crc[i];
+
+                    buffer.bufferCurrentPos = (int)(bufferEnd - b);
+                }
+            }
+        }
+        
+        private byte* WriteProduceRequestHeader(byte* b, string topic, Int32 correlationId, out byte* requestSizePtr, out byte* messageSetSizePtr)
         {
             const Int16 ApiVersion = 3;
 
@@ -442,7 +445,7 @@ namespace NKafka
             return b;
         }
 
-        public static ProduceResponse ReadProduceResponse(byte* b)
+        private static ProduceResponse ReadProduceResponse(byte* b)
         {
             // ProduceResponse => [TopicName [Partition ErrorCode Offset Timestamp]] ThrottleTime
             //   TopicName => string
