@@ -81,55 +81,57 @@ namespace NKafka
                     {
                         Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
 
-                        List<Buffer> fs = null;
+                        List<Buffer> addToInFlight = null;
                         lock (forSendLock)
                         {
                             if (this.bufferPool.ForSend.Count > 0)
                             {
-                                fs = new List<Buffer>(this.bufferPool.ForSend);
+                                addToInFlight = new List<Buffer>(this.bufferPool.ForSend);
                                 this.bufferPool.ForSend.Clear();
-                                this.bufferPool.InFlight.AddRange(fs);
+                                this.bufferPool.InFlight.AddRange(addToInFlight);
                             }                            
                         }
 
-                        if (fs != null)
+                        if (addToInFlight != null)
                         {
-                            foreach (var b in fs)
+                            foreach (var b in addToInFlight)
                             {
                                 client.Send(b.buffer, b.bufferCurrentPos);        
                             }
                         }
 
+                        // TODO: do receive first, and prioritize over send (loop until none).
                         if (!client.DataToReceive)
                         {
                             continue;
                         }
 
-                        ProduceResponse pr;
+                        int correlationId;
                         fixed (byte *bf = client.Receive())
                         {   
-                            pr = ReadProduceResponse(bf);
+                            ProduceResponse pr = ReadProduceResponse(bf);
                             this.ack(pr);
+                            correlationId = pr.CorrelationId;
                         }
 
-                        Buffer doneBuffer = null;
+                        Buffer receivedResponseFor = null;
                         foreach (var b in this.bufferPool.InFlight)
                         {
-                            if (b.correlationId == pr.CorrelationId)
+                            if (b.correlationId == correlationId)
                             {
-                                doneBuffer = b;
+                                receivedResponseFor = b;
                                 break;
                             }
                         }
 
-                        if (doneBuffer == null)
+                        if (receivedResponseFor == null)
                         {
                             throw new Exception("Unexpected correlation id");
                         }
 
                         lock (freeForUseLock)
                         {
-                            this.bufferPool.Move_InFlight_To_FreeForUse(doneBuffer);
+                            this.bufferPool.Move_InFlight_To_FreeForUse(receivedResponseFor);
                         }
                     }
                 }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
