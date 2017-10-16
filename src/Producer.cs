@@ -144,7 +144,29 @@ namespace NKafka
                         Task.Delay(TimeSpan.FromMilliseconds(50)).Wait();
                         lock (producerLock)
                         {
-                            this.bufferPool.MoveToForFinalizeIfRequired(this.config.LingerMs, this.config.BatchSize);
+                            List<KeyValuePair<TopicPartition, Buffer>> toTransition = null;
+                            foreach (var kvp in this.bufferPool.FillingUp)
+                            {
+                                // 1. if reached max number in a batch.
+                                if (kvp.Value.bufferMessageCount >= this.config.BatchSize)
+                                {
+                                    if (toTransition == null)
+                                    {
+                                        toTransition = new List<KeyValuePair<TopicPartition, Buffer>>();
+                                    }
+                                    toTransition.Add(kvp);
+                                    continue;
+                                }
+                                // 2. if waited to long before sending.
+                                // TODO: LingerMs.
+                            }
+                            if (toTransition != null)
+                            {
+                                foreach (var kvp in toTransition)
+                                {
+                                    this.bufferPool.Move_FillingUp_To_ForFinalize(kvp.Key);
+                                }
+                            }
                             FinalizeAndSend();
                         }
                     }
@@ -153,7 +175,7 @@ namespace NKafka
         public unsafe void Produce(string topic, byte[] key, byte[] value)
         {
             var tp = new TopicPartition(topic, 0);
-            var buffer = bufferPool.GetFreeForUseBufferBlocking(tp, freeForUseLock);
+            var buffer = bufferPool.GetTopicPartitionBuffer_Blocking(tp, freeForUseLock);
         
             if (buffer.bufferCurrentPos + Buffer.MessageFixedOverhead + (key == null ? 0 : key.Length) + (value == null ? 0 : value.Length) > buffer.buffer.Length)
             {
@@ -161,7 +183,7 @@ namespace NKafka
                 {
                     this.bufferPool.Move_FillingUp_To_ForFinalize(tp);
                 }
-                buffer = bufferPool.GetFreeForUseBufferBlocking(tp, freeForUseLock);
+                buffer = bufferPool.GetTopicPartitionBuffer_Blocking(tp, freeForUseLock);
             }
 
             lock (producerLock)
